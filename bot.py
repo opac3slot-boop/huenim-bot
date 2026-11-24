@@ -1,8 +1,7 @@
-
 import asyncio
+import os
 import random
 import re
-import os
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
@@ -10,45 +9,55 @@ from aiogram.types import Message
 CHANCE = 0.35
 
 SPECIAL_WORDS = {
-    "лестница": "хуестница",
-    "яблоко": "хуяблоко",
-    "ялта": "хуялта",
-    "математика": "хуематика",
-    "кошка": "хуёшка",
-    "гипсокартон": "хуипсокартон",
     "пылесос": "хуесос",
     "крокодил": "хуедил",
-    "пылесборник": "хуесборник",
     "самокат": "хуекат",
-    "понедельник": "хуедельник",
     "бутерброд": "хуерброд",
-    "электричка": "хуетричка",
     "бегемот": "хуемот",
     "мандарин": "хуерин",
-    "аккордеон": "хуердеон",
     "паровоз": "хуевоз",
-    "аптека": "хуетека",
+}
+
+VOWELS = "аеёиоуыэюя"
+VOWEL_MAP = {
+    "а": "я",
+    "о": "ё",
+    "у": "ю",
+    "ы": "и",
+    "э": "е",
 }
 
 
-def make_huenim(word):
+def make_huenim(word: str) -> str:
     original = word
-    word = word.lower()
+    lower_word = word.lower()
 
-    result = SPECIAL_WORDS.get(word)
+    if lower_word in SPECIAL_WORDS:
+        result = SPECIAL_WORDS[lower_word]
+    else:
+        first_vowel_idx = -1
+        for i, char in enumerate(lower_word):
+            if char in VOWELS:
+                first_vowel_idx = i
+                break
 
-    if result is None:
-        result = "ху" + word
+        if first_vowel_idx == -1:
+            result = "ху" + lower_word
+        else:
+            first_vowel = lower_word[first_vowel_idx]
+            mapped_vowel = VOWEL_MAP.get(first_vowel, first_vowel)
+            result = "ху" + mapped_vowel + lower_word[first_vowel_idx + 1 :]
 
+    if original.isupper() and len(original) > 1:
+        return result.upper()
     if original[0].isupper():
-        result = result.capitalize()
+        return result.capitalize()
 
     return result
 
 
 async def main():
     token = os.getenv("BOT_TOKEN")
-
     if not token:
         raise RuntimeError("BOT_TOKEN не задан")
 
@@ -60,18 +69,21 @@ async def main():
         if message.from_user and message.from_user.is_bot:
             return
 
-        text = message.text.strip()
+        text = re.sub(r"^[^\wА-Яа-яЁё]+|[^\wА-Яа-яЁё]+$", "", message.text.strip())
 
-        if not re.fullmatch(r"[А-Яа-яЁё-]+", text):
+        if not re.fullmatch(r"[А-Яа-яЁё]+(-[А-Яа-яЁё]+)*", text):
             return
 
-        if len(text) < 3:
+        if len(text) < 4:
             return
 
         if random.random() > CHANCE:
             return
 
-        await message.reply(make_huenim(text))
+        response = make_huenim(text)
+
+        if response.lower() != text.lower():
+            await message.reply(response)
 
     print("Хуеним-бот запущен!")
     await dp.start_polling(bot)
