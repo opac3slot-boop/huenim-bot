@@ -162,8 +162,7 @@ FEMALE_PATTERNS = compile_insults(FEMALE_INSULTS)
 
 
 def find_insult(text):
-    # Только для проверки оскорблений:
-    # Е и Ё считаются одинаковыми.
+    # Е и Ё считаются одинаковыми
     normalized_text = text.lower().replace("ё", "е")
 
     matches = []
@@ -300,7 +299,8 @@ async def main():
         if response.lower() != clean_text.lower():
             await message.answer(response)
 
-        await dp.start_polling(bot)
+    # ЗАПУСК ПОЛУЧЕНИЯ СООБЩЕНИЙ ИЗ TELEGRAM
+    await dp.start_polling(bot)
 
 
 if __name__ == "__main__":
