@@ -89,7 +89,6 @@ MALE_INSULTS = [
     r"хуеглот(?:а|у|ом|е|ы|ов|ам|ами|ах)?",
     r"хуил(?:а|ы|е|у|ой|ами|ах)?",
     r"пиздобол(?:а|у|ом|е|ы|ов|ам|ами|ах)?",
-    r"пиздюк(?:а|у|ом|е|и|ов|ам|ами|ах)?",
     r"мудак(?:а|у|ом|е|и|ов|ам|ами|ах)?",
     r"мудил(?:а|ы|е|у|ой|ами|ах)?",
     r"мудозвон(?:а|у|ом|е|ы|ов|ам|ами|ах)?",
@@ -265,7 +264,22 @@ async def main():
         if not original_text:
             return
 
-        # 1. ОСКОРБЛЕНИЯ — ОТВЕТОМ НА СООБЩЕНИЕ
+        # 1. ПИЗДЮК — СЛУЧАЙНЫЙ ОТВЕТ РЕПЛАЕМ
+        if re.search(
+            r"(?<!\w)пиздюк(?!\w)",
+            original_text,
+            re.IGNORECASE
+        ):
+            remember_text(original_text)
+
+            await message.reply(random.choice([
+                "че надо",
+                "а?",
+                "чего"
+            ]))
+            return
+
+        # 2. ОСТАЛЬНЫЕ ОСКОРБЛЕНИЯ — ОТВЕТОМ
         insult_response = find_insult(original_text)
 
         if insult_response:
@@ -273,7 +287,7 @@ async def main():
             await message.reply(insult_response)
             return
 
-        # 2. ПАМЯТЬ — ОБЫЧНЫМ СООБЩЕНИЕМ В ЧАТ
+        # 3. ПАМЯТЬ — ОБЫЧНЫМ СООБЩЕНИЕМ
         memory = get_random_memory()
         remember_text(original_text)
 
@@ -281,7 +295,7 @@ async def main():
             await message.answer(memory)
             return
 
-        # 3. ХУЕНИМЫ — ОТВЕТОМ НА СООБЩЕНИЕ
+        # 4. ХУЕНИМЫ — ОТВЕТОМ НА СООБЩЕНИЕ
         clean_text = re.sub(
             r"^[^\wА-Яа-яЁё]+|[^\wА-Яа-яЁё]+$",
             "",
