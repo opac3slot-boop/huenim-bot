@@ -15,13 +15,12 @@ from aiogram.types import Message
 
 HUENIM_CHANCE = 0.30
 MEMORY_CHANCE = 0.07
-
 DB_NAME = "memory.db"
 MAX_MEMORY_LENGTH = 300
 
 
 # =========================
-# 1. ХУЕНИМЫ — КОД ДРУГА
+# ХУЕНИМЫ
 # =========================
 
 SPECIAL_WORDS = {
@@ -64,7 +63,12 @@ def make_huenim(word: str) -> str:
         else:
             first_vowel = lower_word[first_vowel_idx]
             mapped_vowel = VOWEL_MAP.get(first_vowel, first_vowel)
-            result = "ху" + mapped_vowel + lower_word[first_vowel_idx + 1:]
+
+            result = (
+                "ху"
+                + mapped_vowel
+                + lower_word[first_vowel_idx + 1:]
+            )
 
     if original.isupper() and len(original) > 1:
         return result.upper()
@@ -76,7 +80,7 @@ def make_huenim(word: str) -> str:
 
 
 # =========================
-# 2. ОСКОРБЛЕНИЯ
+# МУЖСКИЕ ОСКОРБЛЕНИЯ
 # =========================
 
 MALE_INSULTS = [
@@ -125,6 +129,11 @@ MALE_INSULTS = [
     r"оболтус(?:а|у|ом|е|ы|ов|ам|ами|ах)?",
 ]
 
+
+# =========================
+# ЖЕНСКИЕ ОСКОРБЛЕНИЯ
+# =========================
+
 FEMALE_INSULTS = [
     r"сучк(?:а|и|е|у|ой|ам|ами|ах)",
     r"твар(?:ь|и|ью|ей|ям|ями|ях)",
@@ -162,18 +171,18 @@ FEMALE_PATTERNS = compile_insults(FEMALE_INSULTS)
 
 
 def find_insult(text):
-    # Е и Ё считаются одинаковыми
     normalized_text = text.lower().replace("ё", "е")
-
     matches = []
 
     for pattern in MALE_PATTERNS:
         match = pattern.search(normalized_text)
+
         if match:
             matches.append((match.start(), "папаша твой"))
 
     for pattern in FEMALE_PATTERNS:
         match = pattern.search(normalized_text)
+
         if match:
             matches.append((match.start(), "мамка твоя"))
 
@@ -181,11 +190,12 @@ def find_insult(text):
         return None
 
     matches.sort(key=lambda item: item[0])
+
     return matches[0][1]
 
 
 # =========================
-# 3. ПАМЯТЬ БОТА
+# ПАМЯТЬ БОТА
 # =========================
 
 def init_database():
@@ -231,7 +241,7 @@ def get_random_memory():
 
 
 # =========================
-# 4. ОСНОВНАЯ РАБОТА БОТА
+# ЗАПУСК БОТА
 # =========================
 
 async def main():
@@ -255,26 +265,23 @@ async def main():
         if not original_text:
             return
 
-        # Сначала проверяем оскорбления
+        # 1. ОСКОРБЛЕНИЯ — ОТВЕТОМ НА СООБЩЕНИЕ
         insult_response = find_insult(original_text)
 
         if insult_response:
             remember_text(original_text)
-            await message.answer(insult_response)
+            await message.reply(insult_response)
             return
 
-        # Получаем старое воспоминание
+        # 2. ПАМЯТЬ — ОБЫЧНЫМ СООБЩЕНИЕМ В ЧАТ
         memory = get_random_memory()
-
-        # Запоминаем новое сообщение
         remember_text(original_text)
 
-        # Спонтанное сообщение — 7%
         if memory and random.random() < MEMORY_CHANCE:
             await message.answer(memory)
             return
 
-        # Проверяем, является ли сообщение одним словом
+        # 3. ХУЕНИМЫ — ОТВЕТОМ НА СООБЩЕНИЕ
         clean_text = re.sub(
             r"^[^\wА-Яа-яЁё]+|[^\wА-Яа-яЁё]+$",
             "",
@@ -290,16 +297,14 @@ async def main():
         if len(clean_text) < 4:
             return
 
-        # Хуенимы — 30%
         if random.random() >= HUENIM_CHANCE:
             return
 
         response = make_huenim(clean_text)
 
         if response.lower() != clean_text.lower():
-            await message.answer(response)
+            await message.reply(response)
 
-    # ЗАПУСК ПОЛУЧЕНИЯ СООБЩЕНИЙ ИЗ TELEGRAM
     await dp.start_polling(bot)
 
 
