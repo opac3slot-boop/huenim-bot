@@ -15,7 +15,7 @@ from aiogram.types import Message
 # НАСТРОЙКИ
 # =========================
 
-HUENIM_CHANCE = 0.30
+HUENIM_CHANCE = 0.25
 MEMORY_CHANCE = 0.07
 
 CATCHPHRASE_CHANCE = 0.02
@@ -245,6 +245,15 @@ def init_database():
             )
         """)
 
+        # Отдельный мут для каждого чата.
+        # muted_until = NULL означает бессрочный мут.
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS bot_mutes (
+                chat_id INTEGER PRIMARY KEY,
+                muted_until REAL
+            )
+        """)
+
 
 # =========================
 # ПАМЯТЬ БОТА
@@ -294,7 +303,7 @@ def get_random_memory():
 
 
 # =========================
-# ЕЖЕДНЕВНАЯ СТАТИСТИКА
+# СТАТИСТИКА ОСКОРБЛЕНИЙ
 # =========================
 
 def get_today():
@@ -343,10 +352,6 @@ def count_user_insults(message: Message):
 
 
 def make_user_mention(user_id, username, first_name):
-    """
-    Возвращает обычный текст, без HTML-ссылок
-    и без ссылки на профиль Telegram.
-    """
     if username:
         return f"@{username}"
 
@@ -354,9 +359,6 @@ def make_user_mention(user_id, username, first_name):
 
 
 def insult_word_form(count):
-    """
-    Правильное склонение слова «оскорбление».
-    """
     if 11 <= count % 100 <= 14:
         return "оскорблений"
 
@@ -395,8 +397,136 @@ def get_daily_leader():
     return random.choice(leaders)
 
 
+def get_ranking(today_only=False):
+    with sqlite3.connect(DB_NAME) as connection:
+        if today_only:
+            rows = connection.execute("""
+                SELECT
+                    user_id,
+                    MAX(username),
+                    MAX(first_name),
+                    SUM(count)
+                FROM daily_insults
+                WHERE day = ?
+                GROUP BY user_id
+                ORDER BY SUM(count) DESC, user_id
+            """, (get_today(),)).fetchall()
+        else:
+            rows = connection.execute("""
+                SELECT
+                    user_id,
+                    MAX(username),
+                    MAX(first_name),
+                    SUM(count)
+                FROM daily_insults
+                GROUP BY user_id
+                ORDER BY SUM(count) DESC, user_id
+            """).fetchall()
+
+    return rows
+
+
+def format_ranking(rows, title):
+    if not rows:
+        if title == "рейтинг забияк дня":
+            return "сегодня никто не распизделся"
+        return "пока никто не распизделся"
+
+    lines = [title, ""]
+
+    previous_count = None
+    current_rank = 0
+
+    for index, row in enumerate(rows, start=1):
+        user_id, username, first_name, count = row
+
+        if count != previous_count:
+            current_rank = index
+            previous_count = count
+
+        mention = make_user_mention(
+            user_id,
+            username,
+            first_name
+        )
+
+        word_form = insult_word_form(count)
+
+        lines.append(
+            f"{current_rank}. {mention} — "
+            f"{count} {word_form}"
+        )
+
+    return "\n".join(lines)
+
+
 # =========================
-# ОБЩИЕ ТРИГГЕРЫ
+# МУТ
+# =========================
+
+def set_mute(chat_id, duration_seconds=None):
+    """
+    duration_seconds=None — бессрочный мут.
+    Иначе сохраняем точное время окончания.
+    """
+    muted_until = None
+
+    if duration_seconds is not None:
+        muted_until = (
+            datetime.now(timezone.utc).timestamp()
+            + duration_seconds
+        )
+
+    with sqlite3.connect(DB_NAME) as connection:
+        connection.execute("""
+            INSERT INTO bot_mutes (chat_id, muted_until)
+            VALUES (?, ?)
+            ON CONFLICT(chat_id)
+            DO UPDATE SET muted_until = excluded.muted_until
+        """, (chat_id, muted_until))
+
+
+def remove_mute(chat_id):
+    with sqlite3.connect(DB_NAME) as connection:
+        connection.execute(
+            "DELETE FROM bot_mutes WHERE chat_id = ?",
+            (chat_id,)
+        )
+
+
+def is_muted(chat_id):
+    with sqlite3.connect(DB_NAME) as connection:
+        row = connection.execute("""
+            SELECT muted_until
+            FROM bot_mutes
+            WHERE chat_id = ?
+        """, (chat_id,)).fetchone()
+
+        if row is None:
+            return False
+
+        muted_until = row[0]
+
+        # NULL означает бессрочный мут.
+        if muted_until is None:
+            return True
+
+        now = datetime.now(timezone.utc).timestamp()
+
+        if now < muted_until:
+            return True
+
+        # Время мута истекло — автоматически снимаем его.
+        connection.execute(
+            "DELETE FROM bot_mutes WHERE chat_id = ?",
+            (chat_id,)
+        )
+
+        return False
+
+
+# =========================
+# КОМАНДЫ
 # =========================
 
 PIIZDYUK_PATTERN = re.compile(
@@ -414,6 +544,16 @@ DAILY_LEADER_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+RANKING_DAY_PATTERN = re.compile(
+    r"^\s*п(?:и|е)здюк\s+рейтинг\s+забияк\s+дня\s*[.!?]*\s*$",
+    re.IGNORECASE
+)
+
+RANKING_ALL_PATTERN = re.compile(
+    r"^\s*п(?:и|е)здюк\s+рейтинг\s+забияк\s*[.!?]*\s*$",
+    re.IGNORECASE
+)
+
 SAY_PATTERN = re.compile(
     r"(?<!\w)п(?:и|е)здюк\s+скажи(?:\s+|$)(.*)",
     re.IGNORECASE | re.DOTALL
@@ -423,6 +563,47 @@ SHCHELBAN_PATTERN = re.compile(
     r"(?<!\w)щелбан(?!\w)",
     re.IGNORECASE
 )
+
+# Поддерживаются секунды, минуты, часы, дни и недели.
+MUTE_COMMAND_PATTERN = re.compile(
+    r"^\s*п(?:и|е)здюк\s+помолчи"
+    r"(?:\s+(\d+)\s*"
+    r"(секунд(?:у|ы|а)?|сек|с|"
+    r"минут(?:у|ы|а)?|мин|"
+    r"час(?:а|ов)?|ч|"
+    r"день|дня|дней|д|"
+    r"недел(?:ю|и|я|ь)|нед))?"
+    r"\s*[.!?]*\s*$",
+    re.IGNORECASE
+)
+
+UNMUTE_COMMAND_PATTERN = re.compile(
+    r"^\s*п(?:и|е)здюк\s+вернись\s*[.!?]*\s*$",
+    re.IGNORECASE
+)
+
+
+def parse_mute_duration(amount, unit):
+    amount = int(amount)
+    unit = unit.lower()
+
+    if amount <= 0:
+        return None
+
+    if unit.startswith(("сек", "с")):
+        multiplier = 1
+    elif unit.startswith(("мин", "м")):
+        multiplier = 60
+    elif unit.startswith(("час", "ч")):
+        multiplier = 60 * 60
+    elif unit.startswith(("д",)):
+        multiplier = 24 * 60 * 60
+    elif unit.startswith(("нед",)):
+        multiplier = 7 * 24 * 60 * 60
+    else:
+        return None
+
+    return amount * multiplier
 
 
 # =========================
@@ -544,36 +725,92 @@ async def main():
             message.text or message.caption or ""
         ).strip()
 
-        # Считаем оскорбления участника
+        # =====================================
+        # 1. СЧЁТ ОСКОРБЛЕНИЙ
+        # Работает даже во время мута.
+        # =====================================
+
         count_user_insults(message)
 
         # =====================================
-        # 1. «ПИЗДЮК СКАЖИ ...»
+        # 2. КОМАНДА «ПОМОЛЧИ»
         # =====================================
 
-        say_match = SAY_PATTERN.search(original_text)
+        if message.chat.type in ("group", "supergroup"):
+            mute_match = MUTE_COMMAND_PATTERN.fullmatch(
+                original_text
+            )
 
-        if say_match:
-            phrase = say_match.group(1).strip()
+            if mute_match:
+                amount, unit = mute_match.groups()
 
-            if phrase:
-                remember_exact_text(phrase)
-                await message.reply(phrase)
+                if amount is None:
+                    # Бессрочный мут.
+                    await message.reply("молчу")
+                    set_mute(message.chat.id)
+                else:
+                    duration = parse_mute_duration(
+                        amount,
+                        unit
+                    )
 
-            return
+                    if duration is None:
+                        await message.reply(
+                            "не понял время мута"
+                        )
+                        return
+
+                    await message.reply("молчу")
+                    set_mute(message.chat.id, duration)
+
+                return
 
         # =====================================
-        # 2. «ПИЗДЮК ДАЙ СОВЕТ» / «ЧЕ ДЕЛАТЬ»
+        # 3. КОМАНДА «ВЕРНИСЬ»
+        # Работает даже во время мута.
         # =====================================
 
-        if ADVICE_PATTERN.search(original_text):
+        if message.chat.type in ("group", "supergroup"):
+            if UNMUTE_COMMAND_PATTERN.fullmatch(original_text):
+                await message.reply("я вернулся")
+                remove_mute(message.chat.id)
+                return
+
+        # =====================================
+        # 4. РЕЙТИНГ ЗА ДЕНЬ
+        # Работает даже во время мута.
+        # =====================================
+
+        if RANKING_DAY_PATTERN.fullmatch(original_text):
+            rows = get_ranking(today_only=True)
+
             await message.reply(
-                random.choice(ADVICE_RESPONSES)
+                format_ranking(
+                    rows,
+                    "рейтинг забияк дня"
+                )
             )
             return
 
         # =====================================
-        # 3. «КТО ДОХУЯ ПИЗДИТ»
+        # 5. РЕЙТИНГ ЗА ВСЁ ВРЕМЯ
+        # Работает даже во время мута.
+        # =====================================
+
+        if RANKING_ALL_PATTERN.fullmatch(original_text):
+            rows = get_ranking(today_only=False)
+
+            await message.reply(
+                format_ranking(
+                    rows,
+                    "рейтинг забияк за всё время"
+                )
+            )
+            return
+
+        # =====================================
+        # 6. «КТО РАСПИЗДЕЛСЯ»
+        # Работает даже во время мута.
         # =====================================
 
         if DAILY_LEADER_PATTERN.search(original_text):
@@ -596,26 +833,58 @@ async def main():
             word_form = insult_word_form(count)
 
             await message.reply(
-                f"сегодня {mention} дохуя пиздит"
+                f"сегодня {mention} дохуя пиздит "
                 f"({count} {word_form})"
             )
             return
 
         # =====================================
-        # 4. ЩЕЛБАН
+        # 7. ЕСЛИ БОТ В МУТЕ — БОЛЬШЕ НЕ РЕАГИРУЕТ
+        # Подсчёт оскорблений выше уже выполнен.
+        # =====================================
+
+        if message.chat.type in ("group", "supergroup"):
+            if is_muted(message.chat.id):
+                return
+
+        # =====================================
+        # 8. «ПИЗДЮК СКАЖИ ...»
+        # =====================================
+
+        say_match = SAY_PATTERN.search(original_text)
+
+        if say_match:
+            phrase = say_match.group(1).strip()
+
+            if phrase:
+                remember_exact_text(phrase)
+                await message.reply(phrase)
+
+            return
+
+        # =====================================
+        # 9. «ПИЗДЮК ДАЙ СОВЕТ» / «ЧЕ ДЕЛАТЬ»
+        # =====================================
+
+        if ADVICE_PATTERN.search(original_text):
+            await message.reply(
+                random.choice(ADVICE_RESPONSES)
+            )
+            return
+
+        # =====================================
+        # 10. ЩЕЛБАН
         # =====================================
 
         if SHCHELBAN_PATTERN.search(original_text):
             target = get_reply_target(message)
 
-            # Если щелбан прилетел по самому боту
             if target and target.id == bot_user_id:
                 await message.reply(
                     random.choice(SHCHELBAN_RESPONSES)
                 )
                 return
 
-            # Если щелбан прилетел по участнику группы
             if target:
                 mention = make_user_mention(
                     target.id,
@@ -628,7 +897,6 @@ async def main():
                 )
                 return
 
-            # Если щелбан отправлен с @username
             username = get_mentioned_username(original_text)
 
             if username:
@@ -639,7 +907,7 @@ async def main():
             return
 
         # =====================================
-        # 5. ОБЫЧНЫЙ ТРИГГЕР «ПИЗДЮК» / «ПЕЗДЮК»
+        # 11. ОБЫЧНЫЙ ТРИГГЕР «ПИЗДЮК» / «ПЕЗДЮК»
         # =====================================
 
         if PIIZDYUK_PATTERN.search(original_text):
@@ -651,7 +919,7 @@ async def main():
             return
 
         # =====================================
-        # 6. ОСТАЛЬНЫЕ ОСКОРБЛЕНИЯ
+        # 12. ОСТАЛЬНЫЕ ОСКОРБЛЕНИЯ
         # =====================================
 
         insult_response = find_insult(original_text)
@@ -662,7 +930,7 @@ async def main():
             return
 
         # =====================================
-        # 7. СЛУЧАЙНЫЕ СОБЫТИЯ В ГРУППЕ
+        # 13. СЛУЧАЙНЫЕ СОБЫТИЯ В ГРУППЕ
         # =====================================
 
         if message.chat.type in ("group", "supergroup"):
@@ -683,7 +951,7 @@ async def main():
                 return
 
         # =====================================
-        # 8. ПАМЯТЬ — ОБЫЧНЫМ СООБЩЕНИЕМ
+        # 14. ПАМЯТЬ — ОБЫЧНЫМ СООБЩЕНИЕМ
         # =====================================
 
         if original_text:
@@ -695,7 +963,8 @@ async def main():
                 return
 
         # =====================================
-        # 9. ХУЕНИМЫ — ОТВЕТОМ
+        # 15. ХУЕНИМЫ — ОТВЕТОМ
+        # Шанс: 25%.
         # =====================================
 
         if not original_text:
