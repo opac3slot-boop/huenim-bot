@@ -596,7 +596,7 @@ async def main():
             word_form = insult_word_form(count)
 
             await message.reply(
-                f"сегодня {mention} распизделся "
+                f"сегодня {mention} дохуя пиздит"
                 f"({count} {word_form})"
             )
             return
