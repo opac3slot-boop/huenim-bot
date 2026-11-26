@@ -4,7 +4,6 @@ import os
 import random
 import re
 import sqlite3
-import html
 
 from datetime import datetime, timedelta, timezone
 
@@ -188,10 +187,6 @@ def normalized_text(text: str) -> str:
 
 
 def get_all_insults(text: str):
-    """
-    Возвращает все распознанные оскорбления.
-    Каждое отдельное вхождение считается отдельно.
-    """
     text = normalized_text(text)
     found = set()
 
@@ -203,10 +198,6 @@ def get_all_insults(text: str):
 
 
 def find_insult(text):
-    """
-    Сохраняет старое поведение:
-    реагирует на первое найденное оскорбление.
-    """
     text = normalized_text(text)
     matches = []
 
@@ -260,11 +251,6 @@ def init_database():
 # =========================
 
 def remember_exact_text(text):
-    """
-    Сохраняет фразу целиком.
-    Для команды «пиздюк скажи» нет ограничения в 300 символов.
-    Фраза не разбивается на отдельные слова.
-    """
     if not text:
         return
 
@@ -316,10 +302,6 @@ def get_today():
 
 
 def count_user_insults(message: Message):
-    """
-    Считает каждое распознанное оскорбление
-    в сообщении участника группы.
-    """
     if message.chat.type not in ("group", "supergroup"):
         return
 
@@ -361,19 +343,32 @@ def count_user_insults(message: Message):
 
 
 def make_user_mention(user_id, username, first_name):
+    """
+    Возвращает обычный текст, без HTML-ссылок
+    и без ссылки на профиль Telegram.
+    """
     if username:
-        safe_username = html.escape(username)
-        return (
-            f'<a href="https://t.me/{safe_username}">'
-            f'@{safe_username}</a>'
-        )
+        return f"@{username}"
 
-    safe_name = html.escape(first_name or "пользователь")
+    return first_name or "пользователь"
 
-    return (
-        f'<a href="tg://user?id={user_id}">'
-        f'{safe_name}</a>'
-    )
+
+def insult_word_form(count):
+    """
+    Правильное склонение слова «оскорбление».
+    """
+    if 11 <= count % 100 <= 14:
+        return "оскорблений"
+
+    last_digit = count % 10
+
+    if last_digit == 1:
+        return "оскорбление"
+
+    if 2 <= last_digit <= 4:
+        return "оскорбления"
+
+    return "оскорблений"
 
 
 def get_daily_leader():
@@ -549,8 +544,7 @@ async def main():
             message.text or message.caption or ""
         ).strip()
 
-        # Сначала учитываем оскорбления в сообщении.
-        # Это происходит до обработки команд.
+        # Считаем оскорбления участника
         count_user_insults(message)
 
         # =====================================
@@ -599,10 +593,11 @@ async def main():
                 first_name
             )
 
+            word_form = insult_word_form(count)
+
             await message.reply(
                 f"сегодня {mention} распизделся "
-                f"({count} оскорблений)",
-                parse_mode="HTML"
+                f"({count} {word_form})"
             )
             return
 
@@ -629,8 +624,7 @@ async def main():
                 )
 
                 await message.answer(
-                    f"пиздюк отвесил щелбан {mention}",
-                    parse_mode="HTML"
+                    f"пиздюк отвесил щелбан {mention}"
                 )
                 return
 
@@ -638,16 +632,8 @@ async def main():
             username = get_mentioned_username(original_text)
 
             if username:
-                safe_username = html.escape(username)
-
-                mention = (
-                    f'<a href="https://t.me/{safe_username}">'
-                    f'@{safe_username}</a>'
-                )
-
                 await message.answer(
-                    f"пиздюк отвесил щелбан {mention}",
-                    parse_mode="HTML"
+                    f"пиздюк отвесил щелбан @{username}"
                 )
 
             return
@@ -681,14 +667,12 @@ async def main():
 
         if message.chat.type in ("group", "supergroup"):
 
-            # Случайная фраза — обычным сообщением
             if random.random() < CATCHPHRASE_CHANCE:
                 await message.answer(
                     random.choice(CATCHPHRASES)
                 )
                 return
 
-            # Случайный жест — реплаем жирным
             if random.random() < GESTURE_CHANCE:
                 gesture = random.choice(GESTURES)
 
