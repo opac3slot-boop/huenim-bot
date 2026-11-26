@@ -4,8 +4,11 @@ import os
 import random
 import re
 import sqlite3
+import html
 
-from aiogram import Bot, Dispatcher, F
+from datetime import datetime, timedelta, timezone
+
+from aiogram import Bot, Dispatcher
 from aiogram.types import Message
 
 
@@ -15,8 +18,15 @@ from aiogram.types import Message
 
 HUENIM_CHANCE = 0.30
 MEMORY_CHANCE = 0.07
+
+CATCHPHRASE_CHANCE = 0.02
+GESTURE_CHANCE = 0.02
+
 DB_NAME = "memory.db"
 MAX_MEMORY_LENGTH = 300
+
+# Московское время: UTC+3
+MOSCOW_TIME = timezone(timedelta(hours=3))
 
 
 # =========================
@@ -110,6 +120,8 @@ MALE_INSULTS = [
     r"идиот(?:а|у|ом|е|ы|ов|ам|ами|ах)?",
     r"дурак(?:а|у|ом|е|и|ов|ам|ами|ах)?",
     r"дебил(?:а|у|ом|е|ы|ов|ам|ами|ах)?",
+    r"дибил(?:а|у|ом|е|ы|ов|ам|ами|ах)?",
+    r"ебач(?:а|у|ем|е|и|ей|ам|ами|ах)?",
     r"кретин(?:а|у|ом|е|ы|ов|ам|ами|ах)?",
     r"кончен(?:ный|ый|ного|ого|ному|ому|ным|ым|ном|ом|ные|ых|ыми)",
     r"придурок(?:а|у|ом|е|и|ов|ам|ами|ах)?",
@@ -141,6 +153,7 @@ FEMALE_INSULTS = [
     r"ебнут(?:ая|ой|ую|ые|ых|ыми)",
     r"ебланк(?:а|и|е|у|ой|ам|ами|ах)",
     r"долбоебк(?:а|и|е|у|ой|ам|ами|ах)",
+    r"ебачих(?:а|и|е|у|ой|ам|ами|ах)",
     r"кончен(?:ная|ая|ной|ой|ную|ую|ные|ых|ыми)",
     r"мраз(?:ь|и|ью|ей|ям|ями|ях)",
     r"паскуд(?:а|ы|е|у|ой|ам|ами|ах)",
@@ -148,6 +161,7 @@ FEMALE_INSULTS = [
     r"дур(?:а|ы|е|у|ой|ам|ами|ах)",
     r"идиотк(?:а|и|е|у|ой|ам|ами|ах)",
     r"дебилк(?:а|и|е|у|ой|ам|ами|ах)",
+    r"дибилк(?:а|и|е|у|ой|ам|ами|ах)",
     r"туп(?:ая|ой|ую|ые|ых|ыми)",
     r"негодяйк(?:а|и|е|у|ой|ам|ами|ах)",
     r"овц(?:а|ы|е|у|ой|ам|ами|ах)",
@@ -169,18 +183,41 @@ MALE_PATTERNS = compile_insults(MALE_INSULTS)
 FEMALE_PATTERNS = compile_insults(FEMALE_INSULTS)
 
 
+def normalized_text(text: str) -> str:
+    return text.lower().replace("ё", "е")
+
+
+def get_all_insults(text: str):
+    """
+    Возвращает все распознанные оскорбления.
+    Каждое отдельное вхождение считается отдельно.
+    """
+    text = normalized_text(text)
+    found = set()
+
+    for pattern in MALE_PATTERNS + FEMALE_PATTERNS:
+        for match in pattern.finditer(text):
+            found.add((match.start(), match.end()))
+
+    return sorted(found)
+
+
 def find_insult(text):
-    normalized_text = text.lower().replace("ё", "е")
+    """
+    Сохраняет старое поведение:
+    реагирует на первое найденное оскорбление.
+    """
+    text = normalized_text(text)
     matches = []
 
     for pattern in MALE_PATTERNS:
-        match = pattern.search(normalized_text)
+        match = pattern.search(text)
 
         if match:
             matches.append((match.start(), "папаша твой"))
 
     for pattern in FEMALE_PATTERNS:
-        match = pattern.search(normalized_text)
+        match = pattern.search(text)
 
         if match:
             matches.append((match.start(), "мамка твоя"))
@@ -194,7 +231,7 @@ def find_insult(text):
 
 
 # =========================
-# ПАМЯТЬ БОТА
+# БАЗА ДАННЫХ
 # =========================
 
 def init_database():
@@ -205,6 +242,37 @@ def init_database():
                 text TEXT NOT NULL UNIQUE
             )
         """)
+
+        connection.execute("""
+            CREATE TABLE IF NOT EXISTS daily_insults (
+                day TEXT NOT NULL,
+                user_id INTEGER NOT NULL,
+                username TEXT,
+                first_name TEXT,
+                count INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (day, user_id)
+            )
+        """)
+
+
+# =========================
+# ПАМЯТЬ БОТА
+# =========================
+
+def remember_exact_text(text):
+    """
+    Сохраняет фразу целиком.
+    Для команды «пиздюк скажи» нет ограничения в 300 символов.
+    Фраза не разбивается на отдельные слова.
+    """
+    if not text:
+        return
+
+    with sqlite3.connect(DB_NAME) as connection:
+        connection.execute(
+            "INSERT OR IGNORE INTO memories (text) VALUES (?)",
+            (text,)
+        )
 
 
 def remember_text(text):
@@ -240,6 +308,218 @@ def get_random_memory():
 
 
 # =========================
+# ЕЖЕДНЕВНАЯ СТАТИСТИКА
+# =========================
+
+def get_today():
+    return datetime.now(MOSCOW_TIME).date().isoformat()
+
+
+def count_user_insults(message: Message):
+    """
+    Считает каждое распознанное оскорбление
+    в сообщении участника группы.
+    """
+    if message.chat.type not in ("group", "supergroup"):
+        return
+
+    if not message.from_user or message.from_user.is_bot:
+        return
+
+    text = message.text or message.caption or ""
+
+    if not text:
+        return
+
+    insults = get_all_insults(text)
+    amount = len(insults)
+
+    if amount == 0:
+        return
+
+    user = message.from_user
+    today = get_today()
+
+    with sqlite3.connect(DB_NAME) as connection:
+        connection.execute("""
+            INSERT INTO daily_insults (
+                day, user_id, username, first_name, count
+            )
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(day, user_id)
+            DO UPDATE SET
+                username = excluded.username,
+                first_name = excluded.first_name,
+                count = daily_insults.count + excluded.count
+        """, (
+            today,
+            user.id,
+            user.username,
+            user.first_name,
+            amount
+        ))
+
+
+def make_user_mention(user_id, username, first_name):
+    if username:
+        safe_username = html.escape(username)
+        return (
+            f'<a href="https://t.me/{safe_username}">'
+            f'@{safe_username}</a>'
+        )
+
+    safe_name = html.escape(first_name or "пользователь")
+
+    return (
+        f'<a href="tg://user?id={user_id}">'
+        f'{safe_name}</a>'
+    )
+
+
+def get_daily_leader():
+    today = get_today()
+
+    with sqlite3.connect(DB_NAME) as connection:
+        rows = connection.execute("""
+            SELECT user_id, username, first_name, count
+            FROM daily_insults
+            WHERE day = ?
+            ORDER BY count DESC
+        """, (today,)).fetchall()
+
+    if not rows:
+        return None
+
+    highest_count = rows[0][3]
+
+    leaders = [
+        row for row in rows
+        if row[3] == highest_count
+    ]
+
+    return random.choice(leaders)
+
+
+# =========================
+# ОБЩИЕ ТРИГГЕРЫ
+# =========================
+
+PIIZDYUK_PATTERN = re.compile(
+    r"(?<!\w)п(?:и|е)здюк(?!\w)",
+    re.IGNORECASE
+)
+
+ADVICE_PATTERN = re.compile(
+    r"(?<!\w)п(?:и|е)здюк\s+(?:дай\s+совет|че\s+делать)(?!\w)",
+    re.IGNORECASE
+)
+
+DAILY_LEADER_PATTERN = re.compile(
+    r"(?<!\w)п(?:и|е)здюк\s+кто\s+дохуя\s+пиздит(?!\w)",
+    re.IGNORECASE
+)
+
+SAY_PATTERN = re.compile(
+    r"(?<!\w)п(?:и|е)здюк\s+скажи(?:\s+|$)(.*)",
+    re.IGNORECASE | re.DOTALL
+)
+
+SHCHELBAN_PATTERN = re.compile(
+    r"(?<!\w)щелбан(?!\w)",
+    re.IGNORECASE
+)
+
+
+# =========================
+# СЛУЧАЙНЫЕ ОТВЕТЫ
+# =========================
+
+PIIZDYUK_RESPONSES = [
+    "чего",
+    "а?",
+    "че",
+    "че надо",
+    "кто звал",
+    "че звали",
+    "ты мне?",
+    "че опять",
+    "чуть что сразу пиздюк",
+    "я занят",
+    "сам пиздюк",
+    "да иду я",
+    "да иду блять",
+    "да тут я",
+    "я тут",
+    "ну?",
+]
+
+ADVICE_RESPONSES = [
+    "обоссы",
+    "въеби",
+    "дай по ебалу",
+    "съебись",
+    "забей хуй",
+    "шли нахуй",
+    "иди поспи",
+    "дай пизды",
+    "не еби мозги",
+    "хз",
+    "не позорься",
+    "поплачь",
+    "отпизди",
+    "нахуй оно тебе надо",
+    "да забей",
+]
+
+SHCHELBAN_RESPONSES = [
+    "ай блять",
+    "да за что",
+    "че за хуйня",
+    "щас получишь",
+    "руки не распускай",
+    "я это запомнил",
+    "ало нахуй",
+]
+
+CATCHPHRASES = [
+    "ДИНАСТИЯЯЯЯЯЯЯ",
+    "сиксевен",
+    "СИКСЕВЕН",
+    "я тебя могну",
+]
+
+GESTURES = [
+    "пиздюк обнял",
+    "пиздюк отвесил щелбан",
+]
+
+
+# =========================
+# ЩЕЛБАН: ПОИСК ПОЛУЧАТЕЛЯ
+# =========================
+
+def get_mentioned_username(text):
+    match = re.search(
+        r"(?<!\w)@([A-Za-z0-9_]{5,32})",
+        text
+    )
+
+    if match:
+        return match.group(1)
+
+    return None
+
+
+def get_reply_target(message: Message):
+    replied = message.reply_to_message
+
+    if not replied or not replied.from_user:
+        return None
+
+    return replied.from_user
+
+
+# =========================
 # ЗАПУСК БОТА
 # =========================
 
@@ -254,32 +534,140 @@ async def main():
     bot = Bot(token=token)
     dp = Dispatcher()
 
-    @dp.message(F.text)
+    bot_user = await bot.get_me()
+    bot_user_id = bot_user.id
+
+    @dp.message()
     async def handle_message(message: Message):
-        if message.from_user and message.from_user.is_bot:
+        if not message.from_user:
             return
 
-        original_text = message.text.strip()
-
-        if not original_text:
+        if message.from_user.is_bot:
             return
 
-        # 1. ПИЗДЮК — СЛУЧАЙНЫЙ ОТВЕТ РЕПЛАЕМ
-        if re.search(
-            r"(?<!\w)пиздюк(?!\w)",
-            original_text,
-            re.IGNORECASE
-        ):
+        original_text = (
+            message.text or message.caption or ""
+        ).strip()
+
+        # Сначала учитываем оскорбления в сообщении.
+        # Это происходит до обработки команд.
+        count_user_insults(message)
+
+        # =====================================
+        # 1. «ПИЗДЮК СКАЖИ ...»
+        # =====================================
+
+        say_match = SAY_PATTERN.search(original_text)
+
+        if say_match:
+            phrase = say_match.group(1).strip()
+
+            if phrase:
+                remember_exact_text(phrase)
+                await message.reply(phrase)
+
+            return
+
+        # =====================================
+        # 2. «ПИЗДЮК ДАЙ СОВЕТ» / «ЧЕ ДЕЛАТЬ»
+        # =====================================
+
+        if ADVICE_PATTERN.search(original_text):
+            await message.reply(
+                random.choice(ADVICE_RESPONSES)
+            )
+            return
+
+        # =====================================
+        # 3. «КТО ДОХУЯ ПИЗДИТ»
+        # =====================================
+
+        if DAILY_LEADER_PATTERN.search(original_text):
+            leader = get_daily_leader()
+
+            if leader is None:
+                await message.reply(
+                    "сегодня никто не распизделся"
+                )
+                return
+
+            user_id, username, first_name, count = leader
+
+            mention = make_user_mention(
+                user_id,
+                username,
+                first_name
+            )
+
+            await message.reply(
+                f"сегодня {mention} распизделся "
+                f"({count} оскорблений)",
+                parse_mode="HTML"
+            )
+            return
+
+        # =====================================
+        # 4. ЩЕЛБАН
+        # =====================================
+
+        if SHCHELBAN_PATTERN.search(original_text):
+            target = get_reply_target(message)
+
+            # Если щелбан прилетел по самому боту
+            if target and target.id == bot_user_id:
+                await message.reply(
+                    random.choice(SHCHELBAN_RESPONSES)
+                )
+                return
+
+            # Если щелбан прилетел по участнику группы
+            if target:
+                mention = make_user_mention(
+                    target.id,
+                    target.username,
+                    target.first_name
+                )
+
+                await message.answer(
+                    f"пиздюк отвесил щелбан {mention}",
+                    parse_mode="HTML"
+                )
+                return
+
+            # Если щелбан отправлен с @username
+            username = get_mentioned_username(original_text)
+
+            if username:
+                safe_username = html.escape(username)
+
+                mention = (
+                    f'<a href="https://t.me/{safe_username}">'
+                    f'@{safe_username}</a>'
+                )
+
+                await message.answer(
+                    f"пиздюк отвесил щелбан {mention}",
+                    parse_mode="HTML"
+                )
+
+            return
+
+        # =====================================
+        # 5. ОБЫЧНЫЙ ТРИГГЕР «ПИЗДЮК» / «ПЕЗДЮК»
+        # =====================================
+
+        if PIIZDYUK_PATTERN.search(original_text):
             remember_text(original_text)
 
-            await message.reply(random.choice([
-                "че надо",
-                "а?",
-                "чего"
-            ]))
+            await message.reply(
+                random.choice(PIIZDYUK_RESPONSES)
+            )
             return
 
-        # 2. ОСТАЛЬНЫЕ ОСКОРБЛЕНИЯ — ОТВЕТОМ
+        # =====================================
+        # 6. ОСТАЛЬНЫЕ ОСКОРБЛЕНИЯ
+        # =====================================
+
         insult_response = find_insult(original_text)
 
         if insult_response:
@@ -287,15 +675,48 @@ async def main():
             await message.reply(insult_response)
             return
 
-        # 3. ПАМЯТЬ — ОБЫЧНЫМ СООБЩЕНИЕМ
-        memory = get_random_memory()
-        remember_text(original_text)
+        # =====================================
+        # 7. СЛУЧАЙНЫЕ СОБЫТИЯ В ГРУППЕ
+        # =====================================
 
-        if memory and random.random() < MEMORY_CHANCE:
-            await message.answer(memory)
+        if message.chat.type in ("group", "supergroup"):
+
+            # Случайная фраза — обычным сообщением
+            if random.random() < CATCHPHRASE_CHANCE:
+                await message.answer(
+                    random.choice(CATCHPHRASES)
+                )
+                return
+
+            # Случайный жест — реплаем жирным
+            if random.random() < GESTURE_CHANCE:
+                gesture = random.choice(GESTURES)
+
+                await message.reply(
+                    f"<b>{gesture}</b>",
+                    parse_mode="HTML"
+                )
+                return
+
+        # =====================================
+        # 8. ПАМЯТЬ — ОБЫЧНЫМ СООБЩЕНИЕМ
+        # =====================================
+
+        if original_text:
+            memory = get_random_memory()
+            remember_text(original_text)
+
+            if memory and random.random() < MEMORY_CHANCE:
+                await message.answer(memory)
+                return
+
+        # =====================================
+        # 9. ХУЕНИМЫ — ОТВЕТОМ
+        # =====================================
+
+        if not original_text:
             return
 
-        # 4. ХУЕНИМЫ — ОТВЕТОМ НА СООБЩЕНИЕ
         clean_text = re.sub(
             r"^[^\wА-Яа-яЁё]+|[^\wА-Яа-яЁё]+$",
             "",
