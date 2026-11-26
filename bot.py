@@ -410,7 +410,7 @@ ADVICE_PATTERN = re.compile(
 )
 
 DAILY_LEADER_PATTERN = re.compile(
-    r"(?<!\w)п(?:и|е)здюк\s+кто\s+дохуя\s+пиздит(?!\w)",
+    r"(?<!\w)п(?:и|е)здюк\s+кто\s+распизделся(?!\w)",
     re.IGNORECASE
 )
 
